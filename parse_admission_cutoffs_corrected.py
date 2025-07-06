@@ -46,40 +46,39 @@ stats = {
 
 try:
     # Read the actual data file
-    with open("round2_trimmed.txt", "r", encoding='utf-8') as file:
+    with open("documents/round2_trimmed.txt", "r", encoding='utf-8') as file:
         lines = file.readlines()
         logging.info(f"Read {len(lines)} lines from round2_trimmed.txt")
         extraction_log.append(f"{datetime.now()} - INFO - Read {len(lines)} lines from round2_trimmed.txt\n")
 
         collecting_categories = False
+        i_non_detected = False
         for line_num, line in enumerate(lines, 1):
             line = line.strip()
             
             logging.debug(f"Line {line_num}: Processing line - {line}")
             extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Processing line - {line}\n")
 
-            # Handle I-Non PWD special case
-            if line == "I-Non":
-                i_non_detected = True
-                logging.debug(f"Line {line_num}: Detected I-Non, waiting for PWD")
-                extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Detected I-Non, waiting for PWD\n")
-                continue
-            
-            if i_non_detected and line == "PWD":
-                current_stage = "I-Non PWD"
+            # Generalized I-Non stage handling
+            if i_non_detected and line:
+                current_stage = f"I-Non {line}"
                 stats["stages_processed"] += 1
                 i_non_detected = False
                 logging.info(f"Line {line_num}: Parsed stage - {current_stage}")
                 extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Parsed stage - {current_stage}\n")
-                
-                # Reuse categories from previous stage for I-Non PWD
+                # Reuse categories from previous stage for I-Non X
                 if not pending_categories and last_categories:
                     pending_categories = last_categories.copy()
                     logging.info(f"Line {line_num}: Reusing {len(pending_categories)} categories from previous stage for {current_stage}")
                     extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Reusing {len(pending_categories)} categories from previous stage for {current_stage}\n")
-                
                 # Reset category index for new stage
                 category_index = 0
+                continue
+
+            if line == "I-Non":
+                i_non_detected = True
+                logging.debug(f"Line {line_num}: Detected I-Non, waiting for next stage qualifier")
+                extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Detected I-Non, waiting for next stage qualifier\n")
                 continue
 
             # Skip empty lines outside branch blocks
@@ -319,16 +318,16 @@ try:
     extraction_log.append(f"{datetime.now()} - INFO - Summary: {stats['institutes_processed']} institutes, {stats['branches_processed']} branches, {stats['stages_processed']} stages, {stats['total_rows']} total rows\n")
 
     # Save to Excel
-    output_file = f"admission_cutoffs_corrected_v9_{uuid.uuid4().hex[:8]}.xlsx"
+    output_file = "admission_cutoffs_output.xlsx"
     df.to_excel(output_file, index=False)
     logging.info(f"Excel file generated: {output_file}")
     extraction_log.append(f"{datetime.now()} - INFO - Excel file generated: {output_file}\n")
 
     # Save extraction log
-    with open("extraction_log_corrected_v9.log", "w", encoding='utf-8') as log_file:
+    with open("extraction_log.txt", "w", encoding='utf-8') as log_file:
         log_file.writelines(extraction_log)
-    logging.info("Extraction log generated: extraction_log_corrected_v9.log")
-    extraction_log.append(f"{datetime.now()} - INFO - Extraction log generated: extraction_log_corrected_v9.log\n")
+    logging.info("Extraction log generated: extraction_log.txt")
+    extraction_log.append(f"{datetime.now()} - INFO - Extraction log generated: extraction_log.txt\n")
 
 except FileNotFoundError:
     logging.error("Data file 'round2_trimmed.txt' not found. Please ensure the file exists in the same directory as the script.")
@@ -341,5 +340,5 @@ except Exception as e:
     extraction_log.append(f"{datetime.now()} - ERROR - An error occurred: {str(e)}\n")
 
 # Ensure extraction log is saved even if an exception occurs
-with open("extraction_log_corrected_v9.log", "w", encoding='utf-8') as log_file:
+with open("extraction_log.txt", "w", encoding='utf-8') as log_file:
     log_file.writelines(extraction_log)
