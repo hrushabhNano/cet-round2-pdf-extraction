@@ -1,314 +1,325 @@
 import pandas as pd
 import re
+import uuid
 import logging
-from pathlib import Path
+from datetime import datetime
 
-# Setting up logging
-logging.basicConfig(filename='extraction_log_corrected_v5.log', level=logging.DEBUG,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+# Set up logging to console and file
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('parsing_debug.log'),
+        logging.StreamHandler()
+    ]
+)
 
-# Initialize lists to store parsed data
+# Initialize lists to store parsed data and extraction log
 data = []
+extraction_log = []
 current_institute = {}
 current_branch = {}
-current_status = ''
-current_seat_description = ''
-current_categories = []
-last_categories = []  # Store categories from previous stage
-current_stage = ''
+current_status = ""
+current_seat_desc = ""
+current_stage = ""
 pending_categories = []
-temp_rank = None  # Buffer for rank when percentile is on next line
+last_categories = []  # Store categories from previous stage
+category_index = 0
+buffered_rank = None
+in_branch_block = False  # Track if we're inside a branch block
+skipped_categories = []  # Track categories that were skipped in previous stages
+i_non_detected = False  # Track if I-Non was detected
 
 # Regex patterns
-institute_pattern = re.compile(r'(\d{5}) - (.+?)(?:,\s*(\w+))?$')
-branch_pattern = re.compile(r'(\d{10}) - (.+)')
-status_pattern = re.compile(r'Status:\s*(.+)')
-seat_description_pattern = re.compile(r'(State Level|Home University Seats Allotted to .+|Other Than Home University Seats Allotted to .+)')
-stage_pattern = re.compile(r'^\s*(I|II|III|IV|V|VI|VII|I-Non|Defence|PWD)\s*$')
-category_pattern = re.compile(r'^(GOPENS|GSCS|GSTS|GVJS|GNT[1-3]S|GOBCS|GSEBCS|LOPENS|LSCS|LSTS|LVJS|LNT[1-3]S|LOBCS|LSEBCS|PWDOPENS|PWDOBCS|DEFOPENS|DEFOBCS|DEFROBCS|ORPHAN|EWS|GOPENH|GSCH|GSTH|GVJH|GNT[1-3]H|GOBCH|GSEBCH|LOPENH|LSCH|LSTH|LNT[1-3]H|LOBCH|LSEBCH|PWDOPENH|PWDSCH|PWDOBCH|PWDSEBCH|GOPENO|GSCO|GSTO|GVJO|GNT[1-3]O|GOBCO|GSEBCO|LOPENO|LSCO|LOBCO|LSEBCO|DEFRSCS|TFWS)$')
-rank_only_pattern = re.compile(r'^\s*(\d+)\s*$')
-percentile_only_pattern = re.compile(r'^\s*\((\d+\.\d+)\)\s*$')
-rank_pattern = re.compile(r'^\s*(\d+)\s*\((\d+\.\d+)\)\s*$')
-stage_header_pattern = re.compile(r'^\s*Stage\s*$')
+institute_pattern = re.compile(r"(\d{5}) - (.+), (.+)")
+branch_pattern = re.compile(r"(\d{10}) - (.+)")
+rank_pattern = re.compile(r"(\d+)\s*\(([\d.]+)\)")
+stage_pattern = re.compile(r"^(I|II|III|IV|V|VI|VII|I-Non|Defence|PWD)$")
+category_pattern = re.compile(r"^(GOPENS|GSCS|GOBCS|GSEBCS|LSTS|LVJS|LNT2S|LSEBCS|PWDOPENS|ORPHAN|EWS|LOBCS|TFWS|GSTS|GVJS|GNT1S|GNT2S|GNT3S|LOPENS|LSCS|DEFROBCS|GOPENH|GSCH|GSTH|GVJH|GOBCH|GSEBCH|LOPENH|LSCH|LSTH|LNT2H|LOBCH|LSEBCH|PWDOPENH|PWDOBCH|GNT1H|GOPENO|GSTO|GOBCO|GSEBCO|LOPENO|LSCO|LNT3S|GNT2O|GNT3H|PWDSCH|PWDSEBCH|GVJO|LNT3H|LOBCO|LNT1S|DEFRSCS|DEFOBCS|DEFOPENS|PWDROBC|H)$")
 
-def clean_value(value):
-    """Clean string values by removing extra spaces and quotes."""
-    if isinstance(value, str):
-        return value.strip().replace('^"', '').replace('"$', '')
-    return value
+# Statistics
+stats = {
+    "institutes_processed": 0,
+    "branches_processed": 0,
+    "stages_processed": 0,
+    "total_rows": 0
+}
 
-def save_to_excel(data, output_file='admission_cutoffs_corrected_v5.xlsx'):
-    """Save parsed data to an Excel file."""
-    df = pd.DataFrame(data)
-    df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
-    df.to_excel(output_file, index=False)
-    logging.info(f"Excel file generated: {output_file}")
-
-def add_category_rows(categories, institute, branch, status, seat_desc, stage):
-    """Add rows for all categories, updating existing rows if they exist."""
-    for category in categories:
-        # Check if row already exists for this institute, branch, stage, and category
-        existing_row_index = next((i for i, d in enumerate(data)
-                                  if d['Institute Code'] == institute.get('Institute Code', '')
-                                  and d['Branch Code'] == branch.get('Branch Code', '')
-                                  and d['Stage'] == stage
-                                  and d['Seat Category'] == category), None)
-        if existing_row_index is None:
-            data.append({
-                'Sr No': len(data) + 1,
-                'Institute Code': institute.get('Institute Code', ''),
-                'Institute Name': institute.get('Institute Name', ''),
-                'District': institute.get('District', ''),
-                'Branch Code': branch.get('Branch Code', ''),
-                'Branch Name': branch.get('Branch Name', ''),
-                'Institute Status': status,
-                'Seat Description': seat_desc,
-                'Stage': stage,
-                'Seat Category': category,
-                'Rank': '',
-                'Percentile': ''
-            })
-            logging.info(f"Added new row for category {category} in stage {stage} with no rank data")
-        else:
-            logging.debug(f"Row for category {category} in stage {stage} already exists at index {existing_row_index}")
-
-# Parsing state machine
-state = 'INITIAL'
-input_file = 'round2_trimmed.txt'
 try:
-    with open(input_file, 'r', encoding='utf-8') as file:
-        category_index = 0  # Track current category position
-        for line_num, line in enumerate(file, 1):
-            line = line.strip()
-            logging.debug(f"Line {line_num}: Processing line - {line}")
+    # Read the actual data file
+    with open("round2_trimmed.txt", "r", encoding='utf-8') as file:
+        lines = file.readlines()
+        logging.info(f"Read {len(lines)} lines from round2_trimmed.txt")
+        extraction_log.append(f"{datetime.now()} - INFO - Read {len(lines)} lines from round2_trimmed.txt\n")
 
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            
+            logging.debug(f"Line {line_num}: Processing line - {line}")
+            extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Processing line - {line}\n")
+
+            # Handle I-Non PWD special case
+            if line == "I-Non":
+                i_non_detected = True
+                logging.debug(f"Line {line_num}: Detected I-Non, waiting for PWD")
+                extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Detected I-Non, waiting for PWD\n")
+                continue
+            
+            if i_non_detected and line == "PWD":
+                current_stage = "I-Non PWD"
+                stats["stages_processed"] += 1
+                i_non_detected = False
+                logging.info(f"Line {line_num}: Parsed stage - {current_stage}")
+                extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Parsed stage - {current_stage}\n")
+                
+                # Reuse categories from previous stage for I-Non PWD
+                if not pending_categories and last_categories:
+                    pending_categories = last_categories.copy()
+                    logging.info(f"Line {line_num}: Reusing {len(pending_categories)} categories from previous stage for {current_stage}")
+                    extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Reusing {len(pending_categories)} categories from previous stage for {current_stage}\n")
+                
+                # Reset category index for new stage
+                category_index = 0
+                continue
+
+            # Skip empty lines outside branch blocks
             if not line:
-                if state == 'RANKS' and current_categories and category_index < len(current_categories):
-                    logging.info(f"Line {line_num}: Empty line, skipping rank for category {current_categories[category_index]}")
+                if in_branch_block:
+                    logging.debug(f"Line {line_num}: Empty line inside branch block, skipping category {category_index}")
+                    extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Empty line inside branch block, skipping category {category_index}\n")
+                    # Create a row with empty rank/percentile for the skipped category
+                    if pending_categories and category_index < len(pending_categories):
+                        skipped_categories.append(pending_categories[category_index])
+                        row = {
+                            "Institute Code": current_institute.get("Institute Code", ""),
+                            "Institute Name": current_institute.get("Institute Name", ""),
+                            "District": current_institute.get("District", ""),
+                            "Branch Code": current_branch.get("Branch Code", ""),
+                            "Branch Name": current_branch.get("Branch Name", ""),
+                            "Status": current_status,
+                            "Seat Description": current_seat_desc,
+                            "Stage": current_stage,
+                            "Category": pending_categories[category_index],
+                            "Rank": "",
+                            "Percentile": ""
+                        }
+                        data.append(row)
+                        stats["total_rows"] += 1
+                        logging.info(f"Line {line_num}: Added empty row for skipped category {pending_categories[category_index]} in stage {current_stage}")
+                        extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Added empty row for skipped category {pending_categories[category_index]} in stage {current_stage}\n")
                     category_index += 1
                 else:
-                    logging.debug(f"Line {line_num}: Empty line in {state} state, continuing.")
+                    logging.debug(f"Line {line_num}: Empty line outside branch block, skipping")
+                    extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Empty line outside branch block, skipping\n")
                 continue
 
             # Parse institute
-            institute_match = institute_pattern.match(line)
-            if institute_match:
-                # Process any pending categories for the previous branch/stage
-                if current_categories and category_index < len(current_categories):
-                    for i in range(category_index, len(current_categories)):
-                        add_category_rows([current_categories[i]], current_institute, current_branch, current_status, current_seat_description, current_stage or 'I')
-                state = 'INSTITUTE'
+            if institute_pattern.match(line):
+                match = institute_pattern.match(line)
                 current_institute = {
-                    'Institute Code': clean_value(institute_match.group(1)),
-                    'Institute Name': clean_value(institute_match.group(2)),
-                    'District': clean_value(institute_match.group(3) or '')
+                    "Institute Code": match.group(1),
+                    "Institute Name": match.group(2),
+                    "District": match.group(3)
                 }
-                current_branch = {}
-                current_status = ''
-                current_seat_description = ''
-                current_categories = []
-                last_categories = []
-                pending_categories = []
-                current_stage = ''
-                temp_rank = None
-                category_index = 0
+                stats["institutes_processed"] += 1
                 logging.info(f"Line {line_num}: Parsed institute - {current_institute}")
+                extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Parsed institute - {current_institute}\n")
+                # Reset lower-level context
+                current_branch = {}
+                current_status = ""
+                current_seat_desc = ""
+                current_stage = ""
+                pending_categories = []
+                last_categories = []
+                category_index = 0
+                buffered_rank = None
+                in_branch_block = False
+                skipped_categories = []
+                i_non_detected = False
                 continue
 
             # Parse branch
-            branch_match = branch_pattern.match(line)
-            if branch_match:
-                # Process any pending categories for the previous branch/stage
-                if current_categories and category_index < len(current_categories):
-                    for i in range(category_index, len(current_categories)):
-                        add_category_rows([current_categories[i]], current_institute, current_branch, current_status, current_seat_description, current_stage or 'I')
-                state = 'BRANCH'
+            if branch_pattern.match(line):
+                match = branch_pattern.match(line)
                 current_branch = {
-                    'Branch Code': clean_value(branch_match.group(1)),
-                    'Branch Name': clean_value(branch_match.group(2))
+                    "Branch Code": match.group(1),
+                    "Branch Name": match.group(2)
                 }
-                current_categories = []
-                last_categories = []
-                pending_categories = []
-                current_stage = ''
-                temp_rank = None
-                category_index = 0
+                stats["branches_processed"] += 1
+                in_branch_block = True
                 logging.info(f"Line {line_num}: Parsed branch - {current_branch}")
+                extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Parsed branch - {current_branch}\n")
+                # Reset stage and category context
+                current_status = ""
+                current_seat_desc = ""
+                current_stage = ""
+                pending_categories = []
+                last_categories = []
+                category_index = 0
+                buffered_rank = None
+                skipped_categories = []
+                i_non_detected = False
                 continue
 
             # Parse status
-            status_match = status_pattern.match(line)
-            if status_match:
-                state = 'STATUS'
-                current_status = clean_value(status_match.group(1))
+            if line.startswith("Status:"):
+                current_status = line.replace("Status:", "").strip()
                 logging.info(f"Line {line_num}: Parsed status - {current_status}")
+                extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Parsed status - {current_status}\n")
                 continue
 
             # Parse seat description
-            seat_description_match = seat_description_pattern.match(line)
-            if seat_description_match:
-                state = 'SEAT_DESCRIPTION'
-                current_seat_description = clean_value(seat_description_match.group(1))
-                current_categories = []
-                pending_categories = []
-                current_stage = ''
-                temp_rank = None
-                category_index = 0
-                logging.info(f"Line {line_num}: Parsed seat description - {current_seat_description}")
+            if line in ["State Level", "Home University Seats Allotted to Home University Candidates", 
+                        "Home University Seats Allotted to Other Than Home University Candidates",
+                        "Other Than Home University Seats Allotted to Other Than Home University Candidates"]:
+                current_seat_desc = line
+                logging.info(f"Line {line_num}: Parsed seat description - {current_seat_desc}")
+                extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Parsed seat description - {current_seat_desc}\n")
                 continue
 
-            # Parse stage header
-            stage_header_match = stage_header_pattern.match(line)
-            if stage_header_match:
-                state = 'PENDING_CATEGORIES'
+            # Detect stage header
+            if line == "Stage":
                 pending_categories = []
-                temp_rank = None
                 category_index = 0
                 logging.info(f"Line {line_num}: Detected stage header, awaiting categories")
+                extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Detected stage header, awaiting categories\n")
                 continue
 
             # Parse stage
-            stage_match = stage_pattern.match(line)
-            if stage_match:
-                # Process any pending categories from previous stage
-                if current_categories and category_index < len(current_categories):
-                    for i in range(category_index, len(current_categories)):
-                        add_category_rows([current_categories[i]], current_institute, current_branch, current_status, current_seat_description, current_stage)
-                state = 'CATEGORIES'
-                current_stage = clean_value(stage_match.group(1))
-                current_categories = pending_categories.copy() if pending_categories else last_categories.copy()
-                add_category_rows(current_categories, current_institute, current_branch, current_status, current_seat_description, current_stage)
-                pending_categories = []
+            if stage_pattern.match(line):
+                current_stage = line
+                stats["stages_processed"] += 1
+                logging.info(f"Line {line_num}: Parsed stage - {current_stage}")
+                extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Parsed stage - {current_stage}\n")
+                
+                # Handle special stages that reuse categories from previous stage
+                if current_stage in ["I-Non", "Defence", "VII"] and not pending_categories:
+                    pending_categories = last_categories.copy()
+                    logging.info(f"Line {line_num}: Reusing {len(pending_categories)} categories from previous stage for {current_stage}")
+                    extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Reusing {len(pending_categories)} categories from previous stage for {current_stage}\n")
+                
+                # Store categories for future reuse
+                if pending_categories and current_stage not in ["I-Non", "Defence", "VII", "I-Non PWD"]:
+                    last_categories = pending_categories.copy()
+                
+                # Reset category index for new stage
                 category_index = 0
-                logging.info(f"Line {line_num}: Parsed stage - {current_stage}, using {len(current_categories)} categories")
                 continue
 
-            # Parse category
-            category_match = category_pattern.match(line)
-            if category_match:
-                category = clean_value(category_match.group(1))
-                if state == 'PENDING_CATEGORIES':
-                    pending_categories.append(category)
-                    logging.info(f"Line {line_num}: Stored pending category - {category}")
-                elif state in ['CATEGORIES', 'RANKS']:
-                    state = 'CATEGORIES'
-                    if category not in current_categories:
-                        current_categories.append(category)
-                        last_categories.append(category)  # Update last_categories
-                        add_category_rows([category], current_institute, current_branch, current_status, current_seat_description, current_stage or 'I')
-                    logging.info(f"Line {line_num}: Parsed category - {category}")
-                else:
-                    logging.warning(f"Line {line_num}: Category {category} found in unexpected state {state}")
+            # Store pending categories
+            if category_pattern.match(line):
+                pending_categories.append(line)
+                logging.info(f"Line {line_num}: Stored pending category - {line}")
+                extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Stored pending category - {line}\n")
                 continue
 
-            # Parse rank (single line with rank and percentile)
+            # Parse rank and score (combined format, e.g., "28591 (90.4057549)")
             rank_match = rank_pattern.match(line)
             if rank_match:
-                if not current_stage and pending_categories:
-                    # Assume stage I if ranks appear after categories without a stage
-                    current_stage = 'I'
-                    current_categories = pending_categories.copy()
-                    add_category_rows(current_categories, current_institute, current_branch, current_status, current_seat_description, current_stage)
-                    pending_categories = []
-                    category_index = 0
-                    logging.info(f"Line {line_num}: Assumed stage I for ranks, using {len(current_categories)} categories")
-                
-                state = 'RANKS'
-                rank = clean_value(rank_match.group(1))
-                percentile = clean_value(rank_match.group(2))
-                temp_rank = None  # Clear any buffered rank
-
-                if not current_categories or category_index >= len(current_categories):
-                    logging.error(f"Line {line_num}: Rank found without categories or index out of range - {rank} ({percentile})")
-                    continue
-
-                category = current_categories[category_index]
-                # Find and update existing row
-                for i, d in enumerate(data):
-                    if (d['Institute Code'] == current_institute.get('Institute Code', '') and
-                        d['Branch Code'] == current_branch.get('Branch Code', '') and
-                        d['Stage'] == current_stage and
-                        d['Seat Category'] == category):
-                        data[i].update({
-                            'Rank': rank,
-                            'Percentile': percentile
-                        })
-                        logging.info(f"Line {line_num}: Updated rank - {rank} ({percentile}) for category {category}")
-                        break
-                category_index += 1
+                rank = rank_match.group(1)
+                score = rank_match.group(2)
+                if pending_categories and category_index < len(pending_categories):
+                    row = {
+                        "Institute Code": current_institute.get("Institute Code", ""),
+                        "Institute Name": current_institute.get("Institute Name", ""),
+                        "District": current_institute.get("District", ""),
+                        "Branch Code": current_branch.get("Branch Code", ""),
+                        "Branch Name": current_branch.get("Branch Name", ""),
+                        "Status": current_status,
+                        "Seat Description": current_seat_desc,
+                        "Stage": current_stage,
+                        "Category": pending_categories[category_index],
+                        "Rank": rank,
+                        "Percentile": score
+                    }
+                    data.append(row)
+                    stats["total_rows"] += 1
+                    logging.info(f"Line {line_num}: Added row with rank - {rank} ({score}) for category {pending_categories[category_index]}")
+                    extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Added row with rank - {rank} ({score}) for category {pending_categories[category_index]}\n")
+                    category_index += 1
+                else:
+                    logging.error(f"Line {line_num}: Rank found without categories or index out of range - {line}")
+                    extraction_log.append(f"{datetime.now()} - ERROR - Line {line_num}: Rank found without categories or index out of range - {line}\n")
                 continue
 
-            # Parse rank only
-            rank_only_match = rank_only_pattern.match(line)
-            if rank_only_match:
-                state = 'RANKS'
-                temp_rank = clean_value(rank_only_match.group(1))
-                logging.debug(f"Line {line_num}: Buffered rank - {temp_rank}")
+            # Handle buffered rank (rank on one line, score on next)
+            if line.isdigit():
+                buffered_rank = line
+                logging.debug(f"Line {line_num}: Buffered rank - {buffered_rank}")
+                extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Buffered rank - {buffered_rank}\n")
+                continue
+            if buffered_rank and line.startswith("(") and line.endswith(")"):
+                score = line[1:-1]
+                if pending_categories and category_index < len(pending_categories):
+                    row = {
+                        "Institute Code": current_institute.get("Institute Code", ""),
+                        "Institute Name": current_institute.get("Institute Name", ""),
+                        "District": current_institute.get("District", ""),
+                        "Branch Code": current_branch.get("Branch Code", ""),
+                        "Branch Name": current_branch.get("Branch Name", ""),
+                        "Status": current_status,
+                        "Seat Description": current_seat_desc,
+                        "Stage": current_stage,
+                        "Category": pending_categories[category_index],
+                        "Rank": buffered_rank,
+                        "Percentile": score
+                    }
+                    data.append(row)
+                    stats["total_rows"] += 1
+                    logging.info(f"Line {line_num}: Added row with rank - {buffered_rank} ({score}) for category {pending_categories[category_index]}")
+                    extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Added row with rank - {buffered_rank} ({score}) for category {pending_categories[category_index]}\n")
+                    category_index += 1
+                else:
+                    logging.error(f"Line {line_num}: Rank found without categories or index out of range - {buffered_rank} ({score})")
+                    extraction_log.append(f"{datetime.now()} - ERROR - Line {line_num}: Rank found without categories or index out of range - {buffered_rank} ({score})\n")
+                buffered_rank = None
                 continue
 
-            # Parse percentile only
-            percentile_only_match = percentile_only_pattern.match(line)
-            if percentile_only_match:
-                state = 'RANKS'
-                if temp_rank is None:
-                    logging.warning(f"Line {line_num}: Percentile found without preceding rank - {line}")
-                    continue
+            # Log unhandled lines
+            logging.warning(f"Line {line_num}: Unhandled line - {line}")
+            extraction_log.append(f"{datetime.now()} - WARNING - Line {line_num}: Unhandled line - {line}\n")
 
-                percentile = clean_value(percentile_only_match.group(1))
-                if not current_categories or category_index >= len(current_categories):
-                    logging.error(f"Line {line_num}: Rank found without categories or index out of range - {temp_rank} ({percentile})")
-                    temp_rank = None
-                    continue
+    # Create DataFrame
+    df = pd.DataFrame(data)
+    logging.info(f"Total rows in DataFrame: {len(df)}")
+    extraction_log.append(f"{datetime.now()} - INFO - Total rows in DataFrame: {len(df)}\n")
 
-                category = current_categories[category_index]
-                # Find and update existing row
-                for i, d in enumerate(data):
-                    if (d['Institute Code'] == current_institute.get('Institute Code', '') and
-                        d['Branch Code'] == current_branch.get('Branch Code', '') and
-                        d['Stage'] == current_stage and
-                        d['Seat Category'] == category):
-                        data[i].update({
-                            'Rank': temp_rank,
-                            'Percentile': percentile
-                        })
-                        logging.info(f"Line {line_num}: Updated rank - {temp_rank} ({percentile}) for category {category}")
-                        break
-                temp_rank = None
-                category_index += 1
-                continue
+    # Log summary of missing values per category
+    if not df.empty:
+        for category in df['Category'].unique():
+            missing = df[(df['Category'] == category) & (df['Rank'] == "")].shape[0]
+            logging.info(f"Category {category}: {missing} missing values")
+            extraction_log.append(f"{datetime.now()} - INFO - Category {category}: {missing} missing values\n")
+    else:
+        logging.warning("DataFrame is empty, no data was parsed")
+        extraction_log.append(f"{datetime.now()} - WARNING - DataFrame is empty, no data was parsed\n")
 
-            # Handle unexpected line patterns
-            logging.warning(f"Line {line_num}: Unexpected line pattern - {line} (state: {state})")
+    # Log summary statistics
+    logging.info(f"Summary: {stats['institutes_processed']} institutes, {stats['branches_processed']} branches, {stats['stages_processed']} stages, {stats['total_rows']} total rows")
+    extraction_log.append(f"{datetime.now()} - INFO - Summary: {stats['institutes_processed']} institutes, {stats['branches_processed']} branches, {stats['stages_processed']} stages, {stats['total_rows']} total rows\n")
 
-    # After file processing, add remaining categories for the last stage/branch
-    if pending_categories and not current_stage:
-        current_stage = 'I'
-        current_categories = pending_categories.copy()
-        add_category_rows(current_categories, current_institute, current_branch, current_status, current_seat_description, current_stage)
-        pending_categories = []
-        logging.info(f"Added {len(current_categories)} pending categories for stage I at file end")
-    elif current_categories and category_index < len(current_categories):
-        for i in range(category_index, len(current_categories)):
-            add_category_rows([current_categories[i]], current_institute, current_branch, current_status, current_seat_description, current_stage or 'I')
-            logging.info(f"Added remaining category {current_categories[i]} for stage {current_stage or 'I'}")
+    # Save to Excel
+    output_file = f"admission_cutoffs_corrected_v9_{uuid.uuid4().hex[:8]}.xlsx"
+    df.to_excel(output_file, index=False)
+    logging.info(f"Excel file generated: {output_file}")
+    extraction_log.append(f"{datetime.now()} - INFO - Excel file generated: {output_file}\n")
+
+    # Save extraction log
+    with open("extraction_log_corrected_v9.log", "w", encoding='utf-8') as log_file:
+        log_file.writelines(extraction_log)
+    logging.info("Extraction log generated: extraction_log_corrected_v9.log")
+    extraction_log.append(f"{datetime.now()} - INFO - Extraction log generated: extraction_log_corrected_v9.log\n")
 
 except FileNotFoundError:
-    logging.error(f"Input file '{input_file}' not found in the current directory.")
-    print(f"Error: The file '{input_file}' was not found. Please ensure the file exists in the directory or update the script with the correct file name.")
-    exit(1)
+    logging.error("Data file 'round2_trimmed.txt' not found. Please ensure the file exists in the same directory as the script.")
+    extraction_log.append(f"{datetime.now()} - ERROR - Data file 'round2_trimmed.txt' not found.\n")
+except ValueError as ve:
+    logging.error(f"Input file error: {str(ve)}")
+    extraction_log.append(f"{datetime.now()} - ERROR - Input file error: {str(ve)}\n")
+except Exception as e:
+    logging.error(f"An error occurred: {str(e)}")
+    extraction_log.append(f"{datetime.now()} - ERROR - An error occurred: {str(e)}\n")
 
-# Generate summary log
-missing_values = {}
-for category in set(d['Seat Category'] for d in data):
-    missing_count = sum(1 for d in data if d['Seat Category'] == category and not d['Rank'])
-    missing_values[category] = missing_count
-logging.info("Summary of missing values per category:")
-for category, count in missing_values.items():
-    logging.info(f"Category {category}: {count} missing values")
-logging.info(f"Total Institutes Processed: {len(set(d['Institute Code'] for d in data))}")
-logging.info(f"Total Branches Processed: {len(set(d['Branch Code'] for d in data))}")
-logging.info(f"Total Stages Processed: {len(set(d['Stage'] for d in data))}")
-logging.info("Parsing and Excel generation completed.")
-
-# Save parsed data to Excel
-save_to_excel(data)
+# Ensure extraction log is saved even if an exception occurs
+with open("extraction_log_corrected_v9.log", "w", encoding='utf-8') as log_file:
+    log_file.writelines(extraction_log)
