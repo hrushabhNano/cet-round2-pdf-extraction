@@ -3,6 +3,7 @@ import re
 import uuid
 import logging
 from datetime import datetime
+from collections import deque
 
 # Set up logging to console and file
 logging.basicConfig(
@@ -29,6 +30,12 @@ buffered_rank = None
 in_branch_block = False  # Track if we're inside a branch block
 skipped_categories = []  # Track categories that were skipped in previous stages
 i_non_detected = False  # Track if I-Non was detected
+missing_category_branches = deque()  # Queue for branches with possible overflow
+overflow_pending = False
+overflow_categories = []
+overflow_stage = None
+overflow_seat_desc = None
+overflow_branch_context = None
 
 # Regex patterns
 institute_pattern = re.compile(r"(\d{5}) - (.+), (.+)")
@@ -53,7 +60,14 @@ try:
 
         collecting_categories = False
         i_non_detected = False
+        last_incomplete_branch = None
+        last_line_type = None  # 'rank', 'category', 'stage', 'branch', 'other'
+        overflow_categories = []
+        skip_lines = 0
         for line_num, line in enumerate(lines, 1):
+            if skip_lines > 0:
+                skip_lines -= 1
+                continue
             line = line.strip()
             
             logging.debug(f"Line {line_num}: Processing line - {line}")
@@ -73,25 +87,25 @@ try:
                     extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Reusing {len(pending_categories)} categories from previous stage for {current_stage}\n")
                 # Reset category index for new stage
                 category_index = 0
+                last_line_type = 'stage'
                 continue
 
             if line == "I-Non":
                 i_non_detected = True
                 logging.debug(f"Line {line_num}: Detected I-Non, waiting for next stage qualifier")
                 extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Detected I-Non, waiting for next stage qualifier\n")
+                last_line_type = 'stage'
                 continue
 
             # Skip empty lines outside branch blocks
             if not line:
                 if collecting_categories:
-                    # End of category block
                     collecting_categories = False
                 if in_branch_block:
                     if pending_categories and category_index < len(pending_categories):
                         cat = pending_categories[category_index]
                         logging.debug(f"Line {line_num}: Blank line for category index {category_index} ({cat}) in stage {current_stage}")
                         extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Blank line for category index {category_index} ({cat}) in stage {current_stage}\n")
-                        # Create a row with empty rank/percentile for the skipped category
                         row = {
                             "Institute Code": current_institute.get("Institute Code", ""),
                             "Institute Name": current_institute.get("Institute Name", ""),
@@ -114,9 +128,7 @@ try:
                     else:
                         logging.warning(f"Line {line_num}: Blank line but no category to skip at index {category_index}")
                         extraction_log.append(f"{datetime.now()} - WARNING - Line {line_num}: Blank line but no category to skip at index {category_index}\n")
-                else:
-                    logging.debug(f"Line {line_num}: Empty line outside branch block, skipping")
-                    extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Empty line outside branch block, skipping\n")
+                last_line_type = 'other'
                 continue
 
             # Parse institute
@@ -143,6 +155,7 @@ try:
                 skipped_categories = []
                 i_non_detected = False
                 collecting_categories = False
+                last_line_type = 'branch'
                 continue
 
             # Parse branch
@@ -167,6 +180,7 @@ try:
                 skipped_categories = []
                 i_non_detected = False
                 collecting_categories = False
+                last_line_type = 'branch'
                 continue
 
             # Parse status
@@ -174,6 +188,7 @@ try:
                 current_status = line.replace("Status:", "").strip()
                 logging.info(f"Line {line_num}: Parsed status - {current_status}")
                 extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Parsed status - {current_status}\n")
+                last_line_type = 'other'
                 continue
 
             # Parse seat description
@@ -183,6 +198,7 @@ try:
                 current_seat_desc = line
                 logging.info(f"Line {line_num}: Parsed seat description - {current_seat_desc}")
                 extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Parsed seat description - {current_seat_desc}\n")
+                last_line_type = 'other'
                 continue
 
             # Detect stage header
@@ -192,6 +208,7 @@ try:
                 collecting_categories = True
                 logging.info(f"Line {line_num}: Detected stage header, will collect categories")
                 extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Detected stage header, will collect categories\n")
+                last_line_type = 'stage'
                 continue
 
             # Parse stage
@@ -201,19 +218,16 @@ try:
                 collecting_categories = False
                 logging.info(f"Line {line_num}: Parsed stage - {current_stage}")
                 extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Parsed stage - {current_stage}\n")
-                
                 # Handle special stages that reuse categories from previous stage
                 if current_stage in ["I-Non", "Defence", "VII"] and not pending_categories:
                     pending_categories = last_categories.copy()
                     logging.info(f"Line {line_num}: Reusing {len(pending_categories)} categories from previous stage for {current_stage}")
                     extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Reusing {len(pending_categories)} categories from previous stage for {current_stage}\n")
-                
                 # Store categories for future reuse
                 if pending_categories and current_stage not in ["I-Non", "Defence", "VII", "I-Non PWD"]:
                     last_categories = pending_categories.copy()
-                
-                # Reset category index for new stage
                 category_index = 0
+                last_line_type = 'stage'
                 continue
 
             # Collect categories generically after 'Stage'
@@ -222,9 +236,54 @@ try:
                     pending_categories.append(line)
                     logging.info(f"Line {line_num}: Collected category - {line}")
                     extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Collected category - {line}\n")
+                    last_line_type = 'category'
                     continue
                 else:
                     collecting_categories = False
+
+            # Conservative overflow detection: Only treat as overflow if a block of non-numeric, non-rank, non-header lines appears after a rank
+            if last_line_type == 'rank':
+                # Look ahead to see if the next few lines are all category-like (not numbers, not rank/percentile, not headers)
+                lookahead = 0
+                overflow_block = []
+                while (line_num + lookahead <= len(lines)):
+                    next_line = lines[line_num + lookahead - 1].strip()
+                    if not next_line:
+                        lookahead += 1
+                        continue
+                    if (not stage_pattern.match(next_line)
+                        and not branch_pattern.match(next_line)
+                        and not institute_pattern.match(next_line)
+                        and next_line != "Stage"
+                        and not rank_pattern.match(next_line)
+                        and not next_line.isdigit()):
+                        overflow_block.append(next_line)
+                        lookahead += 1
+                    else:
+                        break
+                # Only treat as overflow if we have at least 2 category-like lines in a row
+                if len(overflow_block) >= 2 and last_incomplete_branch:
+                    for idx, cat in enumerate(overflow_block):
+                        row = {
+                            "Institute Code": last_incomplete_branch["Institute Code"],
+                            "Institute Name": last_incomplete_branch["Institute Name"],
+                            "District": last_incomplete_branch["District"],
+                            "Branch Code": last_incomplete_branch["Branch Code"],
+                            "Branch Name": last_incomplete_branch["Branch Name"],
+                            "Status": last_incomplete_branch["Status"],
+                            "Seat Description": last_incomplete_branch["Seat Description"],
+                            "Stage": last_incomplete_branch["Stage"],
+                            "Category": cat,
+                            "Rank": "",
+                            "Percentile": ""
+                        }
+                        data.append(row)
+                        stats["total_rows"] += 1
+                        logging.info(f"Assigned overflowed category {cat} to branch {last_incomplete_branch['Branch Code']}")
+                        extraction_log.append(f"{datetime.now()} - INFO - Assigned overflowed category {cat} to branch {last_incomplete_branch['Branch Code']}\n")
+                    skip_lines = lookahead
+                    last_line_type = 'category'
+                    continue
 
             # Parse rank and score (combined format, e.g., "28591 (90.4057549)")
             rank_match = rank_pattern.match(line)
@@ -253,9 +312,21 @@ try:
                     logging.info(f"Line {line_num}: Added row with rank - {rank} ({score}) for category {cat}")
                     extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Added row with rank - {rank} ({score}) for category {cat}\n")
                     category_index += 1
+                    # Mark this branch as incomplete in case overflowed categories appear next
+                    last_incomplete_branch = {
+                        "Institute Code": current_institute.get("Institute Code", ""),
+                        "Institute Name": current_institute.get("Institute Name", ""),
+                        "District": current_institute.get("District", ""),
+                        "Branch Code": current_branch.get("Branch Code", ""),
+                        "Branch Name": current_branch.get("Branch Name", ""),
+                        "Status": current_status,
+                        "Seat Description": current_seat_desc,
+                        "Stage": current_stage
+                    }
                 else:
                     logging.error(f"Line {line_num}: Rank found without categories or index out of range - {line}")
                     extraction_log.append(f"{datetime.now()} - ERROR - Line {line_num}: Rank found without categories or index out of range - {line}\n")
+                last_line_type = 'rank'
                 continue
 
             # Handle buffered rank (rank on one line, score on next)
@@ -263,6 +334,7 @@ try:
                 buffered_rank = line
                 logging.debug(f"Line {line_num}: Buffered rank - {buffered_rank}")
                 extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Buffered rank - {buffered_rank}\n")
+                last_line_type = 'rank'
                 continue
             if buffered_rank and line.startswith("(") and line.endswith(")"):
                 score = line[1:-1]
@@ -288,15 +360,28 @@ try:
                     logging.info(f"Line {line_num}: Added row with rank - {buffered_rank} ({score}) for category {cat}")
                     extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Added row with rank - {buffered_rank} ({score}) for category {cat}\n")
                     category_index += 1
+                    # Mark this branch as incomplete in case overflowed categories appear next
+                    last_incomplete_branch = {
+                        "Institute Code": current_institute.get("Institute Code", ""),
+                        "Institute Name": current_institute.get("Institute Name", ""),
+                        "District": current_institute.get("District", ""),
+                        "Branch Code": current_branch.get("Branch Code", ""),
+                        "Branch Name": current_branch.get("Branch Name", ""),
+                        "Status": current_status,
+                        "Seat Description": current_seat_desc,
+                        "Stage": current_stage
+                    }
                 else:
                     logging.error(f"Line {line_num}: Rank found without categories or index out of range - {buffered_rank} ({score})")
                     extraction_log.append(f"{datetime.now()} - ERROR - Line {line_num}: Rank found without categories or index out of range - {buffered_rank} ({score})\n")
                 buffered_rank = None
+                last_line_type = 'rank'
                 continue
 
             # Log unhandled lines
             logging.warning(f"Line {line_num}: Unhandled line - {line}")
             extraction_log.append(f"{datetime.now()} - WARNING - Line {line_num}: Unhandled line - {line}\n")
+            last_line_type = 'other'
 
     # Create DataFrame
     df = pd.DataFrame(data)
