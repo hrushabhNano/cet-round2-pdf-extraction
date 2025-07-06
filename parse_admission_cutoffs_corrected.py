@@ -35,7 +35,6 @@ institute_pattern = re.compile(r"(\d{5}) - (.+), (.+)")
 branch_pattern = re.compile(r"(\d{10}) - (.+)")
 rank_pattern = re.compile(r"(\d+)\s*\(([\d.]+)\)")
 stage_pattern = re.compile(r"^(I|II|III|IV|V|VI|VII|I-Non|Defence|PWD)$")
-category_pattern = re.compile(r"^(GOPENS|GSCS|GOBCS|GSEBCS|LSTS|LVJS|LNT2S|LSEBCS|PWDOPENS|ORPHAN|EWS|LOBCS|TFWS|GSTS|GVJS|GNT1S|GNT2S|GNT3S|LOPENS|LSCS|DEFROBCS|GOPENH|GSCH|GSTH|GVJH|GOBCH|GSEBCH|LOPENH|LSCH|LSTH|LNT2H|LOBCH|LSEBCH|PWDOPENH|PWDOBCH|GNT1H|GOPENO|GSTO|GOBCO|GSEBCO|LOPENO|LSCO|LNT3S|GNT2O|GNT3H|PWDSCH|PWDSEBCH|GVJO|LNT3H|LOBCO|LNT1S|DEFRSCS|DEFOBCS|DEFOPENS|PWDROBC|H)$")
 
 # Statistics
 stats = {
@@ -52,6 +51,7 @@ try:
         logging.info(f"Read {len(lines)} lines from round2_trimmed.txt")
         extraction_log.append(f"{datetime.now()} - INFO - Read {len(lines)} lines from round2_trimmed.txt\n")
 
+        collecting_categories = False
         for line_num, line in enumerate(lines, 1):
             line = line.strip()
             
@@ -84,12 +84,15 @@ try:
 
             # Skip empty lines outside branch blocks
             if not line:
+                if collecting_categories:
+                    # End of category block
+                    collecting_categories = False
                 if in_branch_block:
-                    logging.debug(f"Line {line_num}: Empty line inside branch block, skipping category {category_index}")
-                    extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Empty line inside branch block, skipping category {category_index}\n")
-                    # Create a row with empty rank/percentile for the skipped category
                     if pending_categories and category_index < len(pending_categories):
-                        skipped_categories.append(pending_categories[category_index])
+                        cat = pending_categories[category_index]
+                        logging.debug(f"Line {line_num}: Blank line for category index {category_index} ({cat}) in stage {current_stage}")
+                        extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Blank line for category index {category_index} ({cat}) in stage {current_stage}\n")
+                        # Create a row with empty rank/percentile for the skipped category
                         row = {
                             "Institute Code": current_institute.get("Institute Code", ""),
                             "Institute Name": current_institute.get("Institute Name", ""),
@@ -99,15 +102,19 @@ try:
                             "Status": current_status,
                             "Seat Description": current_seat_desc,
                             "Stage": current_stage,
-                            "Category": pending_categories[category_index],
+                            "Category": cat,
                             "Rank": "",
                             "Percentile": ""
                         }
                         data.append(row)
                         stats["total_rows"] += 1
-                        logging.info(f"Line {line_num}: Added empty row for skipped category {pending_categories[category_index]} in stage {current_stage}")
-                        extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Added empty row for skipped category {pending_categories[category_index]} in stage {current_stage}\n")
-                    category_index += 1
+                        skipped_categories.append(cat)
+                        logging.info(f"Line {line_num}: Added empty row for skipped category {cat} in stage {current_stage}")
+                        extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Added empty row for skipped category {cat} in stage {current_stage}\n")
+                        category_index += 1
+                    else:
+                        logging.warning(f"Line {line_num}: Blank line but no category to skip at index {category_index}")
+                        extraction_log.append(f"{datetime.now()} - WARNING - Line {line_num}: Blank line but no category to skip at index {category_index}\n")
                 else:
                     logging.debug(f"Line {line_num}: Empty line outside branch block, skipping")
                     extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Empty line outside branch block, skipping\n")
@@ -136,6 +143,7 @@ try:
                 in_branch_block = False
                 skipped_categories = []
                 i_non_detected = False
+                collecting_categories = False
                 continue
 
             # Parse branch
@@ -159,6 +167,7 @@ try:
                 buffered_rank = None
                 skipped_categories = []
                 i_non_detected = False
+                collecting_categories = False
                 continue
 
             # Parse status
@@ -181,14 +190,16 @@ try:
             if line == "Stage":
                 pending_categories = []
                 category_index = 0
-                logging.info(f"Line {line_num}: Detected stage header, awaiting categories")
-                extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Detected stage header, awaiting categories\n")
+                collecting_categories = True
+                logging.info(f"Line {line_num}: Detected stage header, will collect categories")
+                extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Detected stage header, will collect categories\n")
                 continue
 
             # Parse stage
             if stage_pattern.match(line):
                 current_stage = line
                 stats["stages_processed"] += 1
+                collecting_categories = False
                 logging.info(f"Line {line_num}: Parsed stage - {current_stage}")
                 extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Parsed stage - {current_stage}\n")
                 
@@ -206,12 +217,15 @@ try:
                 category_index = 0
                 continue
 
-            # Store pending categories
-            if category_pattern.match(line):
-                pending_categories.append(line)
-                logging.info(f"Line {line_num}: Stored pending category - {line}")
-                extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Stored pending category - {line}\n")
-                continue
+            # Collect categories generically after 'Stage'
+            if collecting_categories:
+                if not stage_pattern.match(line):
+                    pending_categories.append(line)
+                    logging.info(f"Line {line_num}: Collected category - {line}")
+                    extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Collected category - {line}\n")
+                    continue
+                else:
+                    collecting_categories = False
 
             # Parse rank and score (combined format, e.g., "28591 (90.4057549)")
             rank_match = rank_pattern.match(line)
@@ -219,6 +233,9 @@ try:
                 rank = rank_match.group(1)
                 score = rank_match.group(2)
                 if pending_categories and category_index < len(pending_categories):
+                    cat = pending_categories[category_index]
+                    logging.debug(f"Line {line_num}: Assigning rank to category index {category_index} ({cat}) in stage {current_stage}")
+                    extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Assigning rank to category index {category_index} ({cat}) in stage {current_stage}\n")
                     row = {
                         "Institute Code": current_institute.get("Institute Code", ""),
                         "Institute Name": current_institute.get("Institute Name", ""),
@@ -228,14 +245,14 @@ try:
                         "Status": current_status,
                         "Seat Description": current_seat_desc,
                         "Stage": current_stage,
-                        "Category": pending_categories[category_index],
+                        "Category": cat,
                         "Rank": rank,
                         "Percentile": score
                     }
                     data.append(row)
                     stats["total_rows"] += 1
-                    logging.info(f"Line {line_num}: Added row with rank - {rank} ({score}) for category {pending_categories[category_index]}")
-                    extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Added row with rank - {rank} ({score}) for category {pending_categories[category_index]}\n")
+                    logging.info(f"Line {line_num}: Added row with rank - {rank} ({score}) for category {cat}")
+                    extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Added row with rank - {rank} ({score}) for category {cat}\n")
                     category_index += 1
                 else:
                     logging.error(f"Line {line_num}: Rank found without categories or index out of range - {line}")
@@ -251,6 +268,9 @@ try:
             if buffered_rank and line.startswith("(") and line.endswith(")"):
                 score = line[1:-1]
                 if pending_categories and category_index < len(pending_categories):
+                    cat = pending_categories[category_index]
+                    logging.debug(f"Line {line_num}: Assigning buffered rank to category index {category_index} ({cat}) in stage {current_stage}")
+                    extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Assigning buffered rank to category index {category_index} ({cat}) in stage {current_stage}\n")
                     row = {
                         "Institute Code": current_institute.get("Institute Code", ""),
                         "Institute Name": current_institute.get("Institute Name", ""),
@@ -260,14 +280,14 @@ try:
                         "Status": current_status,
                         "Seat Description": current_seat_desc,
                         "Stage": current_stage,
-                        "Category": pending_categories[category_index],
+                        "Category": cat,
                         "Rank": buffered_rank,
                         "Percentile": score
                     }
                     data.append(row)
                     stats["total_rows"] += 1
-                    logging.info(f"Line {line_num}: Added row with rank - {buffered_rank} ({score}) for category {pending_categories[category_index]}")
-                    extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Added row with rank - {buffered_rank} ({score}) for category {pending_categories[category_index]}\n")
+                    logging.info(f"Line {line_num}: Added row with rank - {buffered_rank} ({score}) for category {cat}")
+                    extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Added row with rank - {buffered_rank} ({score}) for category {cat}\n")
                     category_index += 1
                 else:
                     logging.error(f"Line {line_num}: Rank found without categories or index out of range - {buffered_rank} ({score})")
