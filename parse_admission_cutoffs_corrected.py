@@ -53,7 +53,7 @@ stats = {
 
 try:
     # Read the actual data file
-    with open("documents/round2_trimmed.txt", "r", encoding='utf-8') as file:
+    with open("documents/round2_overflow_pages.txt", "r", encoding='utf-8') as file:
         lines = file.readlines()
         logging.info(f"Read {len(lines)} lines from round2_trimmed.txt")
         extraction_log.append(f"{datetime.now()} - INFO - Read {len(lines)} lines from round2_trimmed.txt\n")
@@ -242,28 +242,75 @@ try:
                     collecting_categories = False
 
             # Conservative overflow detection: Only treat as overflow if a block of non-numeric, non-rank, non-header lines appears after a rank
-            if last_line_type == 'rank':
-                # Look ahead to see if the next few lines are all category-like (not numbers, not rank/percentile, not headers)
+            # --- BEGIN OVERFLOWED CATEGORY BLOCK ---
+            if last_line_type == 'rank' and last_incomplete_branch:
+                # Look ahead to see if the next few lines are category-like followed by ranks
                 lookahead = 0
-                overflow_block = []
-                while (line_num + lookahead <= len(lines)):
-                    next_line = lines[line_num + lookahead - 1].strip()
+                overflow_categories = []
+                overflow_ranks = []
+                current_lookahead = 0
+                
+                while (line_num + current_lookahead <= len(lines)):
+                    next_line = lines[line_num + current_lookahead - 1].strip()
                     if not next_line:
-                        lookahead += 1
+                        current_lookahead += 1
                         continue
+                    
+                    # Check if it's a category-like line (not numeric, not header, not rank pattern)
                     if (not stage_pattern.match(next_line)
                         and not branch_pattern.match(next_line)
                         and not institute_pattern.match(next_line)
                         and next_line != "Stage"
                         and not rank_pattern.match(next_line)
-                        and not next_line.isdigit()):
-                        overflow_block.append(next_line)
-                        lookahead += 1
+                        and not next_line.isdigit()
+                        and not (next_line.startswith("Status:") or next_line in ["State Level", "Home University Seats Allotted to Home University Candidates", "Home University Seats Allotted to Other Than Home University Candidates", "Other Than Home University Seats Allotted to Other Than Home University Candidates"])):
+                        
+                        overflow_categories.append(next_line)
+                        current_lookahead += 1
+                        
+                        # Look for corresponding rank after this category
+                        rank_lookahead = current_lookahead
+                        while (line_num + rank_lookahead <= len(lines)):
+                            rank_line = lines[line_num + rank_lookahead - 1].strip()
+                            if not rank_line:
+                                rank_lookahead += 1
+                                continue
+                            if rank_pattern.match(rank_line):
+                                overflow_ranks.append(rank_line)
+                                current_lookahead = rank_lookahead + 1
+                                break
+                            elif rank_line.isdigit():
+                                # Handle split rank/percentile format
+                                buffered_rank = rank_line
+                                rank_lookahead += 1
+                                while (line_num + rank_lookahead <= len(lines)):
+                                    percent_line = lines[line_num + rank_lookahead - 1].strip()
+                                    if percent_line.startswith("(") and percent_line.endswith(")"):
+                                        overflow_ranks.append(f"{buffered_rank} {percent_line}")
+                                        current_lookahead = rank_lookahead + 1
+                                        break
+                                    rank_lookahead += 1
+                                break
+                            else:
+                                break
                     else:
                         break
-                # Only treat as overflow if we have at least 2 category-like lines in a row
-                if len(overflow_block) >= 2 and last_incomplete_branch:
-                    for idx, cat in enumerate(overflow_block):
+                
+                # Only treat as overflow if we have at least 1 category with corresponding rank
+                if len(overflow_categories) >= 1 and len(overflow_ranks) >= 1:
+                    logging.info(f"Line {line_num}: Detected overflowed categories with ranks: {list(zip(overflow_categories, overflow_ranks))}")
+                    extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Detected overflowed categories with ranks: {list(zip(overflow_categories, overflow_ranks))}\n")
+                    
+                    for idx, (cat, rank_data) in enumerate(zip(overflow_categories, overflow_ranks)):
+                        # Parse rank and percentile
+                        rank_match = rank_pattern.match(rank_data)
+                        if rank_match:
+                            rank = rank_match.group(1)
+                            score = rank_match.group(2)
+                        else:
+                            rank = ""
+                            score = ""
+                        
                         row = {
                             "Institute Code": last_incomplete_branch["Institute Code"],
                             "Institute Name": last_incomplete_branch["Institute Name"],
@@ -274,16 +321,18 @@ try:
                             "Seat Description": last_incomplete_branch["Seat Description"],
                             "Stage": last_incomplete_branch["Stage"],
                             "Category": cat,
-                            "Rank": "",
-                            "Percentile": ""
+                            "Rank": rank,
+                            "Percentile": score
                         }
                         data.append(row)
                         stats["total_rows"] += 1
-                        logging.info(f"Assigned overflowed category {cat} to branch {last_incomplete_branch['Branch Code']}")
-                        extraction_log.append(f"{datetime.now()} - INFO - Assigned overflowed category {cat} to branch {last_incomplete_branch['Branch Code']}\n")
-                    skip_lines = lookahead
-                    last_line_type = 'category'
+                        logging.info(f"Line {line_num}: Assigned overflowed category {cat} with rank {rank} ({score}) to branch {last_incomplete_branch['Branch Code']}")
+                        extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Assigned overflowed category {cat} with rank {rank} ({score}) to branch {last_incomplete_branch['Branch Code']}\n")
+                    
+                    skip_lines = current_lookahead
+                    last_line_type = 'rank'
                     continue
+            # --- END OVERFLOWED CATEGORY BLOCK ---
 
             # Parse rank and score (combined format, e.g., "28591 (90.4057549)")
             rank_match = rank_pattern.match(line)
@@ -381,6 +430,82 @@ try:
             # Log unhandled lines
             logging.warning(f"Line {line_num}: Unhandled line - {line}")
             extraction_log.append(f"{datetime.now()} - WARNING - Line {line_num}: Unhandled line - {line}\n")
+            
+            # --- BEGIN OVERFLOWED PAGE DETECTION ---
+            # Check if this unhandled line might be an overflowed category
+            if (last_incomplete_branch and 
+                not stage_pattern.match(line) and
+                not branch_pattern.match(line) and
+                not institute_pattern.match(line) and
+                line != "Stage" and
+                not rank_pattern.match(line) and
+                not line.isdigit() and
+                not (line.startswith("Status:") or line in ["State Level", "Home University Seats Allotted to Home University Candidates", "Home University Seats Allotted to Other Than Home University Candidates", "Other Than Home University Seats Allotted to Other Than Home University Candidates"])):
+                
+                # This looks like a category from an overflowed page
+                logging.info(f"Line {line_num}: Detected potential overflowed category: {line}")
+                extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Detected potential overflowed category: {line}\n")
+                
+                # Look ahead for the corresponding rank
+                rank_lookahead = 1
+                rank_data = ""
+                while (line_num + rank_lookahead <= len(lines)):
+                    next_line = lines[line_num + rank_lookahead - 1].strip()
+                    if not next_line:
+                        rank_lookahead += 1
+                        continue
+                    if rank_pattern.match(next_line):
+                        rank_data = next_line
+                        break
+                    elif next_line.isdigit():
+                        # Handle split rank/percentile format
+                        buffered_rank = next_line
+                        rank_lookahead += 1
+                        while (line_num + rank_lookahead <= len(lines)):
+                            percent_line = lines[line_num + rank_lookahead - 1].strip()
+                            if percent_line.startswith("(") and percent_line.endswith(")"):
+                                rank_data = f"{buffered_rank} {percent_line}"
+                                break
+                            rank_lookahead += 1
+                        break
+                    else:
+                        break
+                
+                # Parse rank and percentile
+                rank = ""
+                score = ""
+                if rank_data:
+                    rank_match = rank_pattern.match(rank_data)
+                    if rank_match:
+                        rank = rank_match.group(1)
+                        score = rank_match.group(2)
+                
+                row = {
+                    "Institute Code": last_incomplete_branch["Institute Code"],
+                    "Institute Name": last_incomplete_branch["Institute Name"],
+                    "District": last_incomplete_branch["District"],
+                    "Branch Code": last_incomplete_branch["Branch Code"],
+                    "Branch Name": last_incomplete_branch["Branch Name"],
+                    "Status": last_incomplete_branch["Status"],
+                    "Seat Description": last_incomplete_branch["Seat Description"],
+                    "Stage": last_incomplete_branch["Stage"],
+                    "Category": line,
+                    "Rank": rank,
+                    "Percentile": score
+                }
+                data.append(row)
+                stats["total_rows"] += 1
+                logging.info(f"Line {line_num}: Assigned overflowed category {line} with rank {rank} ({score}) to branch {last_incomplete_branch['Branch Code']}")
+                extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Assigned overflowed category {line} with rank {rank} ({score}) to branch {last_incomplete_branch['Branch Code']}\n")
+                
+                # Skip the rank line if we found one
+                if rank_data:
+                    skip_lines = rank_lookahead
+                
+                last_line_type = 'rank'
+                continue
+            # --- END OVERFLOWED PAGE DETECTION ---
+            
             last_line_type = 'other'
 
     # Create DataFrame
