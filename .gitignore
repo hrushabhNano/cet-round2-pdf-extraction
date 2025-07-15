@@ -1,0 +1,4 @@
+documents/
+*.xlsx
+*.txt
+admission_cutoffs_output.xlsx
