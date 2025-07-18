@@ -421,7 +421,8 @@ try:
     extraction_log.append(f"{datetime.now()} - INFO - Summary: {stats['institutes_processed']} institutes, {stats['branches_processed']} branches, {stats['stages_processed']} stages, {stats['total_rows']} total rows\n")
 
     # Ensure branch codes are treated as strings to preserve leading zeros
-    df['Branch Code'] = df['Branch Code'].astype(str)
+    # Apply string formatting to restore leading zeros if they were lost
+    df['Branch Code'] = df['Branch Code'].astype(str).str.zfill(10)
     
     # Save to Excel with filename based on input file using ExcelWriter to format as text
     output_file = f"{input_base_name}_cutoffs_output.xlsx"
@@ -429,13 +430,15 @@ try:
         df.to_excel(writer, sheet_name='Cutoffs', index=False)
         
         # Get the workbook and worksheet objects
+        from openpyxl.styles import NamedStyle
         workbook = writer.book
         worksheet = writer.sheets['Cutoffs']
         
         # Format the Branch Code column as text to preserve leading zeros
-        for row in range(2, len(df) + 2):  # Starting from row 2 (after header)
-            cell = worksheet[f'D{row}']  # Column D is Branch Code (0-indexed: A=1, B=2, C=3, D=4)
-            cell.value = f"'{str(cell.value)}"  # Add apostrophe to force text format
+        text_style = NamedStyle(name="text_style", number_format="@")
+        for row in range(1, len(df) + 2):  # Starting from row 1 (including header)
+            cell = worksheet[f'D{row}']  # Column D is Branch Code
+            cell.number_format = "@"  # Text format
     
     logging.info(f"Excel file generated: {output_file}")
     extraction_log.append(f"{datetime.now()} - INFO - Excel file generated: {output_file}\n")
