@@ -106,10 +106,10 @@ try:
                         logging.debug(f"Line {line_num}: Blank line for category index {category_index} ({cat}) in stage {current_stage}")
                         extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Blank line for category index {category_index} ({cat}) in stage {current_stage}\n")
                         row = {
-                            "Institute Code": current_institute.get("Institute Code", ""),
-                            "Institute Name": current_institute.get("Institute Name", ""),
-                            "District": current_institute.get("District", ""),
-                            "Branch Code": current_branch.get("Branch Code", ""),
+                            "Institute Code": "",  # Will be filled later
+                            "Institute Name": "",  # Will be filled later
+                            "District": "",  # Will be filled later
+                            "Branch Code": str(current_branch.get("Branch Code", "")),  # Ensure string
                             "Branch Name": current_branch.get("Branch Name", ""),
                             "Status": current_status,
                             "Seat Description": current_seat_desc,
@@ -130,7 +130,7 @@ try:
                 last_line_type = 'other'
                 continue
 
-            # Parse institute
+            # Parse institute (but don't store institute info yet)
             if institute_pattern.match(line):
                 match = institute_pattern.match(line)
                 current_institute = {
@@ -161,7 +161,7 @@ try:
             if branch_pattern.match(line):
                 match = branch_pattern.match(line)
                 current_branch = {
-                    "Branch Code": match.group(1),
+                    "Branch Code": str(match.group(1)),  # Ensure string to preserve leading zeros
                     "Branch Name": match.group(2)
                 }
                 stats["branches_processed"] += 1
@@ -250,10 +250,10 @@ try:
                     logging.debug(f"Line {line_num}: Assigning rank to category index {category_index} ({cat}) in stage {current_stage}")
                     extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Assigning rank to category index {category_index} ({cat}) in stage {current_stage}\n")
                     row = {
-                        "Institute Code": current_institute.get("Institute Code", ""),
-                        "Institute Name": current_institute.get("Institute Name", ""),
-                        "District": current_institute.get("District", ""),
-                        "Branch Code": current_branch.get("Branch Code", ""),
+                        "Institute Code": "",  # Will be filled later
+                        "Institute Name": "",  # Will be filled later
+                        "District": "",  # Will be filled later
+                        "Branch Code": str(current_branch.get("Branch Code", "")),  # Ensure string
                         "Branch Name": current_branch.get("Branch Name", ""),
                         "Status": current_status,
                         "Seat Description": current_seat_desc,
@@ -269,10 +269,10 @@ try:
                     category_index += 1
                     # Mark this branch as incomplete in case overflowed categories appear next
                     last_incomplete_branch = {
-                        "Institute Code": current_institute.get("Institute Code", ""),
-                        "Institute Name": current_institute.get("Institute Name", ""),
-                        "District": current_institute.get("District", ""),
-                        "Branch Code": current_branch.get("Branch Code", ""),
+                        "Institute Code": "",  # Will be filled later
+                        "Institute Name": "",  # Will be filled later
+                        "District": "",  # Will be filled later
+                        "Branch Code": str(current_branch.get("Branch Code", "")),  # Ensure string
                         "Branch Name": current_branch.get("Branch Name", ""),
                         "Status": current_status,
                         "Seat Description": current_seat_desc,
@@ -298,10 +298,10 @@ try:
                     logging.debug(f"Line {line_num}: Assigning buffered rank to category index {category_index} ({cat}) in stage {current_stage}")
                     extraction_log.append(f"{datetime.now()} - DEBUG - Line {line_num}: Assigning buffered rank to category index {category_index} ({cat}) in stage {current_stage}\n")
                     row = {
-                        "Institute Code": current_institute.get("Institute Code", ""),
-                        "Institute Name": current_institute.get("Institute Name", ""),
-                        "District": current_institute.get("District", ""),
-                        "Branch Code": current_branch.get("Branch Code", ""),
+                        "Institute Code": "",  # Will be filled later
+                        "Institute Name": "",  # Will be filled later
+                        "District": "",  # Will be filled later
+                        "Branch Code": str(current_branch.get("Branch Code", "")),  # Ensure string
                         "Branch Name": current_branch.get("Branch Name", ""),
                         "Status": current_status,
                         "Seat Description": current_seat_desc,
@@ -317,10 +317,10 @@ try:
                     category_index += 1
                     # Mark this branch as incomplete in case overflowed categories appear next
                     last_incomplete_branch = {
-                        "Institute Code": current_institute.get("Institute Code", ""),
-                        "Institute Name": current_institute.get("Institute Name", ""),
-                        "District": current_institute.get("District", ""),
-                        "Branch Code": current_branch.get("Branch Code", ""),
+                        "Institute Code": "",  # Will be filled later
+                        "Institute Name": "",  # Will be filled later
+                        "District": "",  # Will be filled later
+                        "Branch Code": str(current_branch.get("Branch Code", "")),  # Ensure string
                         "Branch Name": current_branch.get("Branch Name", ""),
                         "Status": current_status,
                         "Seat Description": current_seat_desc,
@@ -340,8 +340,71 @@ try:
 
     # Create DataFrame
     df = pd.DataFrame(data)
-    logging.info(f"Total rows in DataFrame: {len(df)}")
-    extraction_log.append(f"{datetime.now()} - INFO - Total rows in DataFrame: {len(df)}\n")
+    logging.info(f"Total rows in DataFrame before college mapping: {len(df)}")
+    extraction_log.append(f"{datetime.now()} - INFO - Total rows in DataFrame before college mapping: {len(df)}\n")
+
+    # Now map college codes and names from CSV
+    try:
+        # Read the institute mapping CSV
+        institute_mapping = pd.read_csv("documents/institute_code_names_mapping_r2.csv")
+        logging.info(f"Loaded {len(institute_mapping)} institute mappings from CSV")
+        extraction_log.append(f"{datetime.now()} - INFO - Loaded {len(institute_mapping)} institute mappings from CSV\n")
+        
+        # Create a dictionary for quick lookup
+        institute_dict = {}
+        for _, row in institute_mapping.iterrows():
+            institute_dict[str(row['Institute Code'])] = {
+                'Institute Name': row['Institute Name'],
+                'District': row['Institute Name'].split(',')[-1].strip() if ',' in row['Institute Name'] else "Unknown District"
+            }
+        
+        # Map college codes and names for each row in the dataframe
+        college_mapping_stats = {"mapped": 0, "not_found": 0}
+        
+        for index, row in df.iterrows():
+            branch_code = str(row['Branch Code'])
+            if len(branch_code) >= 5:
+                # Extract first 5 digits and remove leading 0
+                college_code_with_zero = branch_code[:5]
+                college_code = college_code_with_zero.lstrip('0')
+                
+                if college_code in institute_dict:
+                    df.at[index, 'Institute Code'] = college_code
+                    df.at[index, 'Institute Name'] = institute_dict[college_code]['Institute Name']
+                    df.at[index, 'District'] = institute_dict[college_code]['District']
+                    college_mapping_stats["mapped"] += 1
+                else:
+                    df.at[index, 'Institute Code'] = "College Code Not Found"
+                    df.at[index, 'Institute Name'] = "College Name Not Found"
+                    df.at[index, 'District'] = "District Not Found"
+                    college_mapping_stats["not_found"] += 1
+                    logging.warning(f"College code {college_code} (from branch {branch_code}) not found in mapping CSV")
+                    extraction_log.append(f"{datetime.now()} - WARNING - College code {college_code} (from branch {branch_code}) not found in mapping CSV\n")
+            else:
+                df.at[index, 'Institute Code'] = "Invalid Branch Code"
+                df.at[index, 'Institute Name'] = "Invalid Branch Code"
+                df.at[index, 'District'] = "Invalid Branch Code"
+                college_mapping_stats["not_found"] += 1
+                logging.warning(f"Invalid branch code format: {branch_code}")
+                extraction_log.append(f"{datetime.now()} - WARNING - Invalid branch code format: {branch_code}\n")
+        
+        logging.info(f"College mapping complete: {college_mapping_stats['mapped']} mapped, {college_mapping_stats['not_found']} not found")
+        extraction_log.append(f"{datetime.now()} - INFO - College mapping complete: {college_mapping_stats['mapped']} mapped, {college_mapping_stats['not_found']} not found\n")
+        
+    except FileNotFoundError:
+        logging.error("Institute mapping CSV file not found")
+        extraction_log.append(f"{datetime.now()} - ERROR - Institute mapping CSV file not found\n")
+        # Fill with default values if CSV not found
+        df['Institute Code'] = "CSV File Not Found"
+        df['Institute Name'] = "CSV File Not Found"
+        df['District'] = "CSV File Not Found"
+    except Exception as e:
+        logging.error(f"Error during college mapping: {str(e)}")
+        extraction_log.append(f"{datetime.now()} - ERROR - Error during college mapping: {str(e)}\n")
+        # Fill with error values if mapping fails
+        df['Institute Code'] = "Mapping Error"
+        df['Institute Name'] = "Mapping Error"
+        df['District'] = "Mapping Error"
 
     # Log summary of missing values per category
     if not df.empty:
@@ -357,9 +420,23 @@ try:
     logging.info(f"Summary: {stats['institutes_processed']} institutes, {stats['branches_processed']} branches, {stats['stages_processed']} stages, {stats['total_rows']} total rows")
     extraction_log.append(f"{datetime.now()} - INFO - Summary: {stats['institutes_processed']} institutes, {stats['branches_processed']} branches, {stats['stages_processed']} stages, {stats['total_rows']} total rows\n")
 
-    # Save to Excel with filename based on input file
+    # Ensure branch codes are treated as strings to preserve leading zeros
+    df['Branch Code'] = df['Branch Code'].astype(str)
+    
+    # Save to Excel with filename based on input file using ExcelWriter to format as text
     output_file = f"{input_base_name}_cutoffs_output.xlsx"
-    df.to_excel(output_file, index=False)
+    with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Cutoffs', index=False)
+        
+        # Get the workbook and worksheet objects
+        workbook = writer.book
+        worksheet = writer.sheets['Cutoffs']
+        
+        # Format the Branch Code column as text to preserve leading zeros
+        for row in range(2, len(df) + 2):  # Starting from row 2 (after header)
+            cell = worksheet[f'D{row}']  # Column D is Branch Code (0-indexed: A=1, B=2, C=3, D=4)
+            cell.value = f"'{str(cell.value)}"  # Add apostrophe to force text format
+    
     logging.info(f"Excel file generated: {output_file}")
     extraction_log.append(f"{datetime.now()} - INFO - Excel file generated: {output_file}\n")
 
