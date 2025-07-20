@@ -40,7 +40,7 @@ input_base_name = os.path.splitext(os.path.basename(input_filename))[0]
 institute_pattern = re.compile(r"(\d{5}) - (.+), (.+)")
 branch_pattern = re.compile(r"(\d{10}) - (.+)")
 rank_pattern = re.compile(r"(\d+)\s*\(([\d.]+)\)")
-stage_pattern = re.compile(r"^(I|II|III|IV|V|VI|VII|I-Non|Defence|PWD|MH|MI)$")
+stage_pattern = re.compile(r"^(I|II|III|IV|V|VI|VII|I-Non|Defence|PWD|MH)$")
 
 # Statistics
 stats = {
@@ -222,8 +222,13 @@ try:
                     pending_categories = last_categories.copy()
                     logging.info(f"Line {line_num}: Reusing {len(pending_categories)} categories from previous stage for {current_stage}")
                     extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Reusing {len(pending_categories)} categories from previous stage for {current_stage}\n")
-                # Store categories for future reuse
-                if pending_categories and current_stage not in ["I-Non", "Defence", "VII", "I-Non PWD"]:
+                # Special handling for MH stage - it should only use MI category
+                elif current_stage == "MH":
+                    pending_categories = ["MI"]
+                    logging.info(f"Line {line_num}: Set MI as the only category for MH stage")
+                    extraction_log.append(f"{datetime.now()} - INFO - Line {line_num}: Set MI as the only category for MH stage\n")
+                # Store categories for future reuse (excluding MH which has its own specific category MI)
+                if pending_categories and current_stage not in ["I-Non", "Defence", "VII", "I-Non PWD", "MH"]:
                     last_categories = pending_categories.copy()
                 category_index = 0
                 last_line_type = 'stage'
@@ -239,6 +244,8 @@ try:
                     continue
                 else:
                     collecting_categories = False
+
+
 
             # Parse rank and score (combined format, e.g., "28591 (90.4057549)")
             rank_match = rank_pattern.match(line)
