@@ -132,12 +132,12 @@ def main():
     print("Institute Code Extraction and CSV Update Tool")
     print("=" * 50)
     
-    # File paths
-    text_file = "documents/2024ENGG_CAP2_CutOff_cropped.txt"
+    # File paths - Updated to use the uncropped file
+    text_file = "documents/pdf__2024ENGG_CAP2_CutOff.txt"
     csv_file = "documents/institute_code_names_mapping_r2.csv"
     
     # Step 1: Extract institutes from text file
-    print("Step 1: Extracting institutes from text file...")
+    print("Step 1: Extracting institutes from uncropped text file...")
     extracted_institutes = extract_institutes_from_text(text_file)
     
     if not extracted_institutes:
