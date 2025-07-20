@@ -33,7 +33,7 @@ skipped_categories = []  # Track categories that were skipped in previous stages
 i_non_detected = False  # Track if I-Non was detected
 
 # Input file configuration
-input_filename = "documents/2024ENGG_CAP2_CutOff_cropped.txt"
+input_filename = "documents/2024ENGG_CAP3_CutOff_cropped_1.txt"
 input_base_name = os.path.splitext(os.path.basename(input_filename))[0]
 
 # Regex patterns

@@ -1,0 +1,12 @@
+2025-07-20 10:54:39,894 - INFO - Reading 139210 lines from documents/2024ENGG_CAP2_CutOff_cropped.txt
+2025-07-20 10:54:39,911 - INFO - Extracted 68 unique institutes from text file
+2025-07-20 10:54:39,916 - INFO - Loaded 204 existing institutes from CSV
+2025-07-20 10:54:39,918 - INFO - Found 39 missing institutes
+2025-07-20 10:54:39,921 - INFO - Created backup: documents/institute_code_names_mapping_r2_backup.csv
+2025-07-20 10:54:39,922 - INFO - Updated CSV saved with 39 new institutes
+2025-07-20 11:40:44,690 - INFO - Reading 110640 lines from documents/pdf__2024ENGG_CAP2_CutOff.txt
+2025-07-20 11:40:44,705 - INFO - Extracted 352 unique institutes from text file
+2025-07-20 11:40:44,710 - INFO - Loaded 243 existing institutes from CSV
+2025-07-20 11:40:44,712 - INFO - Found 121 missing institutes
+2025-07-20 11:40:44,715 - INFO - Created backup: documents/institute_code_names_mapping_r2_backup.csv
+2025-07-20 11:40:44,716 - INFO - Updated CSV saved with 121 new institutes
